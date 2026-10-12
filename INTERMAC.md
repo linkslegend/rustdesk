@@ -8,7 +8,8 @@ dem Namen „intermac-fernwartung“ weitergegeben werden.
 
 Gegenüber dem Tag `1.5.0` sind folgende Änderungen gemacht:
 
-- `.github/workflows/build-intermac.yml`: eigener, auf Windows x64 und macOS arm64 gekürzter Build-Workflow.
+- `.github/workflows/build-intermac.yml`: eigener, auf Windows x64 und macOS (arm64, x64) gekürzter Build-Workflow. Im macOS-Job wird die App nach dem Bauen ad-hoc signiert
+  (`codesign --force --deep --sign -`) und die Signatur in der fertigen DMG geprüft.
   Die übrigen Upstream-Workflows sind entfernt.
 - `.github/scripts/apply-intermac-config.py`: wird beim Build ausgeführt und
   - belegt `OVERWRITE_SETTINGS` (`libs/hbb_common/src/config.rs`) mit ID-Server, öffentlichem Schlüssel und API-Server,
