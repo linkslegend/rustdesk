@@ -1,7 +1,8 @@
 # Baut den Intermac-Fernwartungs-Client (RustDesk, AGPL-3.0) für genau eine Umgebung.
 # Server, Schlüssel und API-Adresse kommen ausschließlich aus dem GitHub-Environment (Variablen/Secrets
 # RUSTDESK_HOST, RUSTDESK_KEY, RUSTDESK_API); im Code und in dieser Datei steht nichts davon.
-# Die Jobs sind aus .github/workflows/flutter-build.yml (Upstream, Tag 1.5.0) auf Windows x64 und macOS (arm64, x64) gekürzt.
+# Die Jobs sind aus .github/workflows/flutter-build.yml (Upstream, Tag 1.5.3) auf Windows x64 und macOS (arm64, x64) gekürzt.
+# Branding (Name, Icons, Logo) und die eigene Update-Prüfung baut .github/scripts/apply-intermac-branding.py ein.
 name: Intermac Fernwartung bauen
 
 on:
@@ -24,9 +25,12 @@ env:
   MAC_RUST_VERSION: "1.81" # macOS braucht 1.81 (cidre)
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
+  # macOS arm64 wie Upstream ab 1.5.x mit Flutter 3.44: 3.24.5 stürzt dort in attributedSubstringForProposedRange ab
+  # (https://github.com/rustdesk/rustdesk/issues/16817). x64 bleibt auf 3.24.5 (3.44 braucht macOS 10.15).
+  FLUTTER_MACOS_ARM_VERSION: "3.44.9"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
-  VERSION: "1.5.0"
+  VERSION: "1.5.3"
 
 jobs:
   pruefen:
@@ -41,6 +45,8 @@ jobs:
           RUSTDESK_KEY: ${{ vars.RUSTDESK_KEY || secrets.RUSTDESK_KEY }}
           RUSTDESK_API: ${{ secrets.RUSTDESK_API }}
         run: python3 .github/scripts/apply-intermac-config.py --check
+      - name: Branding-Stellen prüfen
+        run: python3 .github/scripts/apply-intermac-branding.py --check
 
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
@@ -84,6 +90,10 @@ jobs:
         run: |
           echo "::add-mask::$RUSTDESK_API"
           python3 .github/scripts/apply-intermac-config.py
+
+      - name: Branding einbauen
+        shell: bash
+        run: python3 .github/scripts/apply-intermac-branding.py
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -227,14 +237,14 @@ jobs:
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
           popd
           mkdir -p ./out
-          mv ./target/release/rustdesk-portable-packer.exe "./out/intermac-fernwartung-${{ inputs.umgebung }}.exe"
+          mv ./target/release/rustdesk-portable-packer.exe "./out/intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}.exe"
           ls -l ./out
 
       - name: Upload Windows-Datei
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: intermac-fernwartung-${{ inputs.umgebung }}-windows
-          path: ./out/intermac-fernwartung-${{ inputs.umgebung }}.exe
+          name: intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}-windows
+          path: ./out/intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}.exe
           retention-days: 1
           if-no-files-found: error
 
@@ -288,6 +298,9 @@ jobs:
           echo "::add-mask::$RUSTDESK_API"
           python3 .github/scripts/apply-intermac-config.py
 
+      - name: Branding einbauen
+        run: python3 .github/scripts/apply-intermac-branding.py
+
       - name: Install build runtime
         run: |
           brew install llvm create-dmg
@@ -309,9 +322,16 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: "stable"
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: ${{ matrix.job.arch == 'arm64' && env.FLUTTER_MACOS_ARM_VERSION || env.FLUTTER_VERSION }}
+
+      - name: Keep CocoaPods for Flutter 3.44 (arm64)
+        # 3.44 schaltet Swift Package Manager ein; alle Plugins haben noch ein podspec.
+        if: ${{ matrix.job.arch == 'arm64' }}
+        run: flutter config --no-enable-swift-package-manager
 
       - name: Patch flutter
+        # Flutter 3.44 (arm64) enthält diesen Dropdown-Fix schon.
+        if: ${{ matrix.job.arch == 'x64' }}
         run: |
           cd $(dirname $(dirname $(which flutter)))
           if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
@@ -325,6 +345,15 @@ jobs:
           # https://github.com/flutter/flutter/issues/133533
           sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
           grep -n '_setFramesEnabledState(false);' ../packages/flutter/lib/src/scheduler/binding.dart
+
+      - name: Patch RustDesk sources for Flutter 3.44 (arm64)
+        # Das Skript nutzt GNU `sed -i`, das BSD-sed von macOS ablehnt.
+        if: ${{ matrix.job.arch == 'arm64' }}
+        shell: bash
+        run: |
+          brew install gnu-sed
+          export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          bash .github/patches/apply_flutter_3.44_source_patches.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -340,7 +369,8 @@ jobs:
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: bridge-artifact
+          # arm64: *.freezed.dart muss zum freezed unter Flutter 3.44 passen.
+          name: ${{ matrix.job.arch == 'arm64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}
           path: ./
 
       - name: Setup vcpkg with Github Actions binary cache
@@ -406,7 +436,8 @@ jobs:
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           mkdir -p out
-          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 "out/intermac-fernwartung-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg" ./flutter/build/macos/Build/Products/Release/RustDesk.app
+          # RustDesk.app behält seinen Dateinamen: src/platform/macos.rs erwartet /Applications/RustDesk.app.
+          create-dmg --volname "Intermac Fernwartung" --volicon flutter/macos/Runner/AppIcon.icns --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 "out/intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg" ./flutter/build/macos/Build/Products/Release/RustDesk.app
           ls -l out
 
       # Das Packen darf das Siegel nicht gebrochen haben: App aus der fertigen DMG prüfen.
@@ -414,7 +445,7 @@ jobs:
         run: |
           MNT="$RUNNER_TEMP/dmgcheck"
           mkdir -p "$MNT"
-          hdiutil attach "out/intermac-fernwartung-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg" -nobrowse -readonly -mountpoint "$MNT"
+          hdiutil attach "out/intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg" -nobrowse -readonly -mountpoint "$MNT"
           trap 'hdiutil detach "$MNT" -quiet || true' EXIT
           codesign --verify --deep --strict --verbose=2 "$MNT/RustDesk.app"
           codesign -dv "$MNT/RustDesk.app" 2>&1 | grep -E "Signature|Format"
@@ -422,7 +453,7 @@ jobs:
       - name: Upload macOS-Datei
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: intermac-fernwartung-${{ inputs.umgebung }}-macos-${{ matrix.job.arch }}
-          path: out/intermac-fernwartung-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg # Verzeichnis oder tar.gz würden Links im Bundle zerstören
+          name: intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}-macos-${{ matrix.job.arch }}
+          path: out/intermac-fernwartung-${{ env.VERSION }}-${{ inputs.umgebung }}-${{ matrix.job.arch }}.dmg # Verzeichnis oder tar.gz würden Links im Bundle zerstören
           retention-days: 1
           if-no-files-found: error
